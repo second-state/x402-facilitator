@@ -287,13 +287,30 @@ impl Eip155MetaTransactionProvider for Eip155ChainProvider {
 
         // Estimate gas if not provided
         if txr.gas.is_none() {
-            let block_id = if self.flashblocks {
+            let is_base_chain = matches!(self.chain.inner(), 8453 | 84532);
+            let block_id = if self.flashblocks || is_base_chain {
                 BlockId::latest()
             } else {
                 BlockId::pending()
             };
-            let gas_limit = self.inner.estimate_gas(txr.clone()).block(block_id).await?;
-            txr.set_gas_limit(gas_limit)
+
+            if is_base_chain {
+                match self.inner.estimate_gas(txr.clone()).block(block_id).await {
+                    Ok(gas_limit) => {
+                        txr.set_gas_limit(gas_limit);
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            chain_id=%self.chain.inner(),
+                            error=?e,
+                            "gas estimation (latest) failed, continuing without explicit limit"
+                        );
+                    }
+                }
+            } else {
+                let gas_limit = self.inner.estimate_gas(txr.clone()).block(block_id).await?;
+                txr.set_gas_limit(gas_limit);
+            }
         }
 
         // Send transaction with error handling for nonce reset
