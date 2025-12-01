@@ -47,10 +47,11 @@ use crate::from_env;
 use crate::network::{Network, USDCDeployment};
 use crate::timestamp::UnixTimestamp;
 use crate::types::{
-    EvmAddress, EvmSignature, ExactPaymentPayload, FacilitatorErrorReason, HexEncodedNonce,
-    MixedAddress, PaymentPayload, PaymentRequirements, Scheme, SettleRequest, SettleResponse,
-    SupportedPaymentKind, SupportedPaymentKindsResponse, TokenAmount, TransactionHash,
-    TransferWithAuthorization, VerifyRequest, VerifyResponse, X402Version,
+    Eip2612Payload, Erc3009Payload, EvmAddress, EvmSignature, ExactEvmPayload, ExactPaymentPayload,
+    FacilitatorErrorReason, HexEncodedNonce, MixedAddress, PaymentPayload, PaymentRequirements,
+    Scheme, SettleRequest, SettleResponse, SupportedPaymentKind, SupportedPaymentKindsResponse,
+    TokenAmount, TransactionHash, TransferWithAuthorization, VerifyRequest, VerifyResponse,
+    X402Version,
 };
 
 sol!(
@@ -60,6 +61,16 @@ sol!(
     #[sol(rpc)]
     USDC,
     "abi/USDC.json"
+);
+
+sol!(
+    /// EIP-2612 permit interface for ERC-20 tokens
+    #[allow(missing_docs)]
+    #[allow(clippy::too_many_arguments)]
+    #[derive(Debug)]
+    #[sol(rpc)]
+    EIP2612,
+    "abi/EIP2612.json"
 );
 
 sol! {
@@ -333,7 +344,8 @@ impl MetaEvmProvider for EvmProvider {
         let mut txr = TransactionRequest::default()
             .with_to(tx.to)
             .with_from(from_address)
-            .with_input(tx.calldata);
+            .with_input(tx.calldata.clone());
+
         if !self.eip1559 {
             let provider = &self.inner;
             let gas: u128 = provider
@@ -438,6 +450,177 @@ impl FromEnvByNetworkBuild for EvmProvider {
     }
 }
 
+/// Settles an EIP-2612 payment by executing permit() then transferFrom() on-chain.
+#[instrument(skip_all, err)]
+async fn settle_eip2612_payment<P: MetaEvmProvider>(
+    provider: &P,
+    contract_address: Address,
+    payment_payload: &ExactEvmPayload,
+    requirements: &PaymentRequirements,
+) -> Result<(MixedAddress, TransactionReceipt), FacilitatorLocalError>
+where
+    FacilitatorLocalError: From<P::Error>,
+{
+    let Eip2612Payload { permit: permit_data, transfer: transfer_data } = match payment_payload {
+        ExactEvmPayload::Eip2612(p) => p,
+        _ => return Err(FacilitatorLocalError::ContractCall(
+            "Expected EIP-2612 payload".to_string()
+        )),
+    };
+
+    let owner: Address = permit_data.owner.into();
+    let spender: Address = requirements
+        .pay_to
+        .clone()
+        .try_into()
+        .map_err(|e| FacilitatorLocalError::InvalidAddress(format!("{e:?}")))?;
+
+    // Extract v, r, s from signature
+    let sig_bytes = &permit_data.signature.0;
+    if sig_bytes.len() != 65 {
+        return Err(FacilitatorLocalError::InvalidSignature(
+            owner.into(),
+            format!("Expected 65-byte signature, got {}", sig_bytes.len()),
+        ));
+    }
+
+    let r = FixedBytes::<32>::from_slice(&sig_bytes[0..32]);
+    let s = FixedBytes::<32>::from_slice(&sig_bytes[32..64]);
+    let v = sig_bytes[64];
+
+    // Create EIP2612 contract instance for building permit + transferFrom calls
+    let eip2612_contract = EIP2612::new(contract_address, provider.inner());
+
+    // Build permit call
+    let permit_call = eip2612_contract.permit(
+        owner,
+        spender,
+        permit_data.value.into(),
+        permit_data.deadline.into(),
+        v,
+        r,
+        s,
+    );
+
+    let permit_receipt = provider
+        .send_transaction(MetaTransaction {
+            to: contract_address,
+            calldata: permit_call.calldata().clone(),
+            confirmations: 1,
+        })
+        .instrument(tracing::info_span!(
+            "settle_eip2612_permit",
+            owner = %owner,
+            spender = %spender,
+            value = %permit_data.value,
+            token_contract = %contract_address,
+            otel.kind = "client",
+        ))
+        .await?;
+
+    if !permit_receipt.status() {
+        return Err(FacilitatorLocalError::ContractCall(
+            format!("Permit transaction failed: {}", permit_receipt.transaction_hash)
+        ));
+    }
+
+    let transfer_call = eip2612_contract.transferFrom(
+        owner,
+        transfer_data.to.into(),
+        transfer_data.amount.into(),
+    );
+
+    let transfer_receipt = provider
+        .send_transaction(MetaTransaction {
+            to: contract_address,
+            calldata: transfer_call.calldata().clone(),
+            confirmations: 1,
+        })
+        .instrument(tracing::info_span!(
+            "settle_eip2612_transferFrom",
+            owner = %owner,
+            to = %transfer_data.to,
+            amount = %transfer_data.amount,
+            token_contract = %contract_address,
+            otel.kind = "client",
+        ))
+        .await?;
+
+    Ok((owner.into(), transfer_receipt))
+}
+
+/// Verifies an EIP-2612 payment by checking nonce and simulating permit().
+#[instrument(skip_all, err)]
+async fn verify_eip2612_payment<P: Provider>(
+    contract: &USDC::USDCInstance<P>,
+    payment_payload: &ExactEvmPayload,
+    requirements: &PaymentRequirements,
+) -> Result<MixedAddress, FacilitatorLocalError> {
+    let permit_data = match payment_payload {
+        ExactEvmPayload::Eip2612(Eip2612Payload { permit, .. }) => permit,
+        _ => return Err(FacilitatorLocalError::ContractCall(
+            "Expected EIP-2612 payload".to_string()
+        )),
+    };
+
+    let owner: Address = permit_data.owner.into();
+    let spender: Address = requirements
+        .pay_to
+        .clone()
+        .try_into()
+        .map_err(|e| FacilitatorLocalError::InvalidAddress(format!("{e:?}")))?;
+
+    // Extract v, r, s from signature (assuming 65-byte ECDSA signature)
+    let sig_bytes = &permit_data.signature.0;
+    if sig_bytes.len() != 65 {
+        return Err(FacilitatorLocalError::InvalidSignature(
+            owner.into(),
+            format!("Expected 65-byte signature, got {}", sig_bytes.len()),
+        ));
+    }
+
+    let r = FixedBytes::<32>::from_slice(&sig_bytes[0..32]);
+    let s = FixedBytes::<32>::from_slice(&sig_bytes[32..64]);
+    let v = sig_bytes[64];
+
+    // Create EIP2612 contract instance for nonce verification
+    let eip2612_contract = EIP2612::new(*contract.address(), contract.provider());
+
+    // Verify current nonce matches
+    let current_nonce = eip2612_contract
+        .nonces(owner)
+        .call()
+        .await
+        .map_err(|e| FacilitatorLocalError::ContractCall(format!("Failed to get nonce: {e:?}")))?;
+
+    if current_nonce != U256::from(permit_data.nonce) {
+        return Err(FacilitatorLocalError::InvalidSignature(
+            owner.into(),
+            format!("Nonce mismatch: expected {}, got {}", permit_data.nonce, current_nonce),
+        ));
+    }
+
+    // Simulate permit call (this will verify the signature on-chain)
+    eip2612_contract
+        .permit(
+            owner,
+            spender,
+            permit_data.value.into(),
+            permit_data.deadline.into(),
+            v,
+            r,
+            s,
+        )
+        .call()
+        .await
+        .map_err(|e| FacilitatorLocalError::InvalidSignature(
+            owner.into(),
+            format!("Permit signature verification failed: {e:?}"),
+        ))?;
+
+    Ok(owner.into())
+}
+
 impl<P> Facilitator for P
 where
     P: MetaEvmProvider + Sync,
@@ -460,9 +643,25 @@ where
     async fn verify(&self, request: &VerifyRequest) -> Result<VerifyResponse, Self::Error> {
         let payload = &request.payment_payload;
         let requirements = &request.payment_requirements;
-        let (contract, payment, eip712_domain) =
+        let (contract, payment, eip712_domain, payment_type) =
             assert_valid_payment(self.inner(), self.chain(), payload, requirements).await?;
 
+        // Handle EIP-2612 separately with dedicated verification logic
+        if let PaymentType::Eip2612 = payment_type {
+            let payment_payload = match &payload.payload {
+                ExactPaymentPayload::Evm(p) => p,
+                _ => return Err(FacilitatorLocalError::UnsupportedNetwork(None)),
+            };
+            let payer = verify_eip2612_payment(
+                &contract,
+                payment_payload,
+                requirements,
+            )
+            .await?;
+            return Ok(VerifyResponse::valid(payer));
+        }
+
+        // ERC-3009 verification flow
         let signed_message = SignedMessage::extract(&payment, &eip712_domain)?;
         let payer = signed_message.address;
         let hash = signed_message.hash;
@@ -557,8 +756,54 @@ where
     async fn settle(&self, request: &SettleRequest) -> Result<SettleResponse, Self::Error> {
         let payload = &request.payment_payload;
         let requirements = &request.payment_requirements;
-        let (contract, payment, eip712_domain) =
+        let (contract, payment, eip712_domain, payment_type) =
             assert_valid_payment(self.inner(), self.chain(), payload, requirements).await?;
+
+        // Handle EIP-2612 settlement with dedicated logic
+        if let PaymentType::Eip2612 = payment_type {
+            let payment_payload = match &payload.payload {
+                ExactPaymentPayload::Evm(p) => p,
+                _ => return Err(FacilitatorLocalError::UnsupportedNetwork(None)),
+            };
+
+            let (payer, receipt) = settle_eip2612_payment(
+                self,
+                *contract.address(),
+                payment_payload,
+                requirements,
+            )
+            .await?;
+
+            let success = receipt.status();
+            if success {
+                tracing::event!(Level::INFO,
+                    status = "ok",
+                    tx = %receipt.transaction_hash,
+                    "EIP-2612 settlement succeeded"
+                );
+                return Ok(SettleResponse {
+                    success: true,
+                    error_reason: None,
+                    payer,
+                    transaction: Some(TransactionHash::Evm(receipt.transaction_hash.0)),
+                    network: payload.network,
+                });
+            } else {
+                tracing::event!(
+                    Level::WARN,
+                    status = "failed",
+                    tx = %receipt.transaction_hash,
+                    "EIP-2612 settlement failed"
+                );
+                return Ok(SettleResponse {
+                    success: false,
+                    error_reason: Some(FacilitatorErrorReason::InvalidScheme),
+                    payer,
+                    transaction: Some(TransactionHash::Evm(receipt.transaction_hash.0)),
+                    network: payload.network,
+                });
+            }
+        }
 
         let signed_message = SignedMessage::extract(&payment, &eip712_domain)?;
         let payer = signed_message.address;
@@ -867,6 +1112,7 @@ async fn assert_domain<P: Provider>(
             .into_future()
             .instrument(tracing::info_span!(
                 "fetch_eip712_name",
+                token = %asset_address,
                 otel.kind = "client",
             ))
             .await
@@ -894,6 +1140,7 @@ async fn assert_domain<P: Provider>(
             .into_future()
             .instrument(tracing::info_span!(
                 "fetch_eip712_version",
+                token = %asset_address,
                 otel.kind = "client",
             ))
             .await
@@ -908,26 +1155,39 @@ async fn assert_domain<P: Provider>(
     Ok(domain)
 }
 
+/// Payment type enum to distinguish between ERC-3009 and EIP-2612 flows
+#[derive(Debug, Clone)]
+enum PaymentType {
+    Erc3009,
+    Eip2612,
+}
+
 /// Runs all preconditions needed for a successful payment:
 /// - Valid scheme, network, and receiver.
 /// - Valid time window (validAfter/validBefore).
 /// - Correct EIP-712 domain construction.
 /// - Sufficient on-chain balance.
 /// - Sufficient value in payload.
+///
+/// Returns the payment type along with contract, payment data, and domain.
 #[instrument(skip_all, err)]
 async fn assert_valid_payment<P: Provider>(
     provider: P,
     chain: &EvmChain,
     payload: &PaymentPayload,
     requirements: &PaymentRequirements,
-) -> Result<(USDC::USDCInstance<P>, ExactEvmPayment, Eip712Domain), FacilitatorLocalError> {
+) -> Result<(USDC::USDCInstance<P>, ExactEvmPayment, Eip712Domain, PaymentType), FacilitatorLocalError> {
     let payment_payload = match &payload.payload {
         ExactPaymentPayload::Evm(payload) => payload,
         ExactPaymentPayload::Solana(_) => {
             return Err(FacilitatorLocalError::UnsupportedNetwork(None));
         }
     };
-    let payer = payment_payload.authorization.from;
+
+    let payer = match payment_payload {
+        ExactEvmPayload::Erc3009(Erc3009Payload { authorization, .. }) => authorization.from,
+        ExactEvmPayload::Eip2612(Eip2612Payload { permit, .. }) => permit.owner,
+    };
     if payload.network != chain.network {
         return Err(FacilitatorLocalError::NetworkMismatch(
             Some(payer.into()),
@@ -949,7 +1209,19 @@ async fn assert_valid_payment<P: Provider>(
             payload.scheme,
         ));
     }
-    let payload_to: EvmAddress = payment_payload.authorization.to;
+    let (payload_to, valid_after, valid_before) = match payment_payload {
+        ExactEvmPayload::Erc3009(Erc3009Payload { authorization, .. }) => (
+            authorization.to,
+            authorization.valid_after,
+            authorization.valid_before,
+        ),
+        ExactEvmPayload::Eip2612(Eip2612Payload { permit, transfer }) => (
+            transfer.to,
+            UnixTimestamp(0),
+            permit.deadline,
+        ),
+    };
+
     let requirements_to: EvmAddress = requirements
         .pay_to
         .clone()
@@ -962,8 +1234,6 @@ async fn assert_valid_payment<P: Provider>(
             requirements_to.to_string(),
         ));
     }
-    let valid_after = payment_payload.authorization.valid_after;
-    let valid_before = payment_payload.authorization.valid_before;
     assert_time(payer.into(), valid_after, valid_before)?;
     let asset_address = requirements
         .asset
@@ -974,28 +1244,49 @@ async fn assert_valid_payment<P: Provider>(
 
     let domain = assert_domain(chain, &contract, payload, &asset_address, requirements).await?;
 
+    let (from, to, value, valid_after, valid_before, nonce, signature) = match payment_payload {
+        ExactEvmPayload::Erc3009(Erc3009Payload { signature, authorization }) => (
+            authorization.from,
+            authorization.to,
+            authorization.value,
+            authorization.valid_after,
+            authorization.valid_before,
+            authorization.nonce,
+            signature.clone(),
+        ),
+        ExactEvmPayload::Eip2612(Eip2612Payload { permit, transfer }) => (
+            permit.owner,
+            transfer.to,
+            transfer.amount,
+            UnixTimestamp(0),
+            permit.deadline,
+            HexEncodedNonce([0u8; 32]),
+            permit.signature.clone(),
+        ),
+    };
+
     let amount_required = requirements.max_amount_required.0;
-    assert_enough_balance(
-        &contract,
-        &payment_payload.authorization.from,
-        amount_required,
-    )
-    .await?;
-    let value: U256 = payment_payload.authorization.value.into();
-    assert_enough_value(&payer, &value, &amount_required)?;
+    assert_enough_balance(&contract, &from, amount_required).await?;
+    let value_u256: U256 = value.into();
+    assert_enough_value(&from, &value_u256, &amount_required)?;
 
     let payment = ExactEvmPayment {
         chain: *chain,
-        from: payment_payload.authorization.from,
-        to: payment_payload.authorization.to,
-        value: payment_payload.authorization.value,
-        valid_after: payment_payload.authorization.valid_after,
-        valid_before: payment_payload.authorization.valid_before,
-        nonce: payment_payload.authorization.nonce,
-        signature: payment_payload.signature.clone(),
+        from,
+        to,
+        value,
+        valid_after,
+        valid_before,
+        nonce,
+        signature,
     };
 
-    Ok((contract, payment, domain))
+    let payment_type = match payment_payload {
+        ExactEvmPayload::Erc3009(_) => PaymentType::Erc3009,
+        ExactEvmPayload::Eip2612(_) => PaymentType::Eip2612,
+    };
+
+    Ok((contract, payment, domain, payment_type))
 }
 
 /// Constructs a full `transferWithAuthorization` call for a verified payment payload.
