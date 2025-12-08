@@ -3,3 +3,6 @@ target/
 *.rs.bk
 *.log
 .env
+docker-compose.yaml
+log/
+*.log
