@@ -1,0 +1,14 @@
+services:
+  x402-rs:
+    restart: unless-stopped
+    build: .
+    image: x402-facilitator
+    container_name: x402-facilitator
+    env_file:
+      - .env
+    volumes:
+      - ./log:/app/log
+    ports:
+      - "0.0.0.0:${SERVER_PORT}:8080"
+    entrypoint: ["sh"]
+    command: ["-c", "x402-facilitator >> /app/log/x402-facilitator.log"]
