@@ -33,9 +33,9 @@
 //! [`PaymentVerificationError::UnsupportedScheme`](x402_types::proto::PaymentVerificationError::UnsupportedScheme).
 
 use std::collections::{HashMap, HashSet};
+use serde_json;
 use x402_types::facilitator::Facilitator;
-use x402_types::proto;
-use x402_types::proto::PaymentVerificationError;
+use x402_types::proto::{self, AsPaymentProblem, ErrorReason, PaymentVerificationError};
 use x402_types::scheme::{SchemeRegistry, X402SchemeFacilitatorError};
 
 /// A local [`Facilitator`](x402_types::facilitator::Facilitator) implementation that delegates to scheme handlers.
@@ -98,11 +98,15 @@ impl Facilitator for FacilitatorLocal<SchemeRegistry> {
             .ok_or(FacilitatorLocalError::Verification(
                 PaymentVerificationError::UnsupportedScheme.into(),
             ))?;
-        let response = handler
-            .verify(request)
-            .await
-            .map_err(FacilitatorLocalError::Verification)?;
-        Ok(response)
+        match handler.verify(request).await {
+            Ok(response) => Ok(response),
+            Err(error) => {
+                let problem = error.as_payment_problem();
+                let reason = payment_problem_reason(&problem);
+                tracing::warn!(error = ?error, reason = %reason, "Verification failed, returning Invalid response");
+                Ok(proto::v1::VerifyResponse::invalid(None, reason).into())
+            }
+        }
     }
 
     async fn settle(
@@ -163,4 +167,21 @@ pub enum FacilitatorLocalError {
     /// typically due to transaction failures or network issues.
     #[error(transparent)]
     Settlement(X402SchemeFacilitatorError),
+}
+
+fn payment_problem_reason(problem: &proto::PaymentProblem) -> String {
+    let reason_code = error_reason_to_string(problem.reason());
+    let details = problem.details();
+    if details.is_empty() {
+        reason_code
+    } else {
+        format!("{reason_code}: {details}")
+    }
+}
+
+fn error_reason_to_string(reason: ErrorReason) -> String {
+    serde_json::to_value(reason)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_string))
+        .unwrap_or_else(|| "unexpected_error".to_string())
 }
