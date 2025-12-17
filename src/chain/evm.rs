@@ -450,56 +450,66 @@ impl FromEnvByNetworkBuild for EvmProvider {
     }
 }
 
+/// Decoded ECDSA signature components for EIP-2612 permit calls.
+struct EcdsaComponents {
+    v: u8,
+    r: FixedBytes<32>,
+    s: FixedBytes<32>,
+}
+
+impl EcdsaComponents {
+    /// Extracts v, r, s from a 65-byte ECDSA signature.
+    fn from_signature(sig: &EvmSignature, signer: Address) -> Result<Self, FacilitatorLocalError> {
+        let bytes = &sig.0;
+        if bytes.len() != 65 {
+            return Err(FacilitatorLocalError::InvalidSignature(
+                signer.into(),
+                format!("Expected 65-byte signature, got {}", bytes.len()),
+            ));
+        }
+        Ok(Self {
+            r: FixedBytes::<32>::from_slice(&bytes[0..32]),
+            s: FixedBytes::<32>::from_slice(&bytes[32..64]),
+            v: bytes[64],
+        })
+    }
+}
+
 /// Settles an EIP-2612 payment by executing permit() then transferFrom() on-chain.
 #[instrument(skip_all, err)]
 async fn settle_eip2612_payment<P: MetaEvmProvider>(
     provider: &P,
     contract_address: Address,
-    payment_payload: &ExactEvmPayload,
+    payload: &Eip2612Payload,
     requirements: &PaymentRequirements,
 ) -> Result<(MixedAddress, TransactionReceipt), FacilitatorLocalError>
 where
     FacilitatorLocalError: From<P::Error>,
 {
-    let Eip2612Payload { permit: permit_data, transfer: transfer_data } = match payment_payload {
-        ExactEvmPayload::Eip2612(p) => p,
-        _ => return Err(FacilitatorLocalError::ContractCall(
-            "Expected EIP-2612 payload".to_string()
-        )),
-    };
+    let Eip2612Payload {
+        permit,
+        transfer,
+    } = payload;
 
-    let owner: Address = permit_data.owner.into();
+    let owner: Address = permit.owner.into();
     let spender: Address = requirements
         .pay_to
         .clone()
         .try_into()
         .map_err(|e| FacilitatorLocalError::InvalidAddress(format!("{e:?}")))?;
 
-    // Extract v, r, s from signature
-    let sig_bytes = &permit_data.signature.0;
-    if sig_bytes.len() != 65 {
-        return Err(FacilitatorLocalError::InvalidSignature(
-            owner.into(),
-            format!("Expected 65-byte signature, got {}", sig_bytes.len()),
-        ));
-    }
-
-    let r = FixedBytes::<32>::from_slice(&sig_bytes[0..32]);
-    let s = FixedBytes::<32>::from_slice(&sig_bytes[32..64]);
-    let v = sig_bytes[64];
-
-    // Create EIP2612 contract instance for building permit + transferFrom calls
+    let sig = EcdsaComponents::from_signature(&permit.signature, owner)?;
     let eip2612_contract = EIP2612::new(contract_address, provider.inner());
 
-    // Build permit call
+    // Step 1: Execute permit to grant allowance
     let permit_call = eip2612_contract.permit(
         owner,
         spender,
-        permit_data.value.into(),
-        permit_data.deadline.into(),
-        v,
-        r,
-        s,
+        permit.value.into(),
+        permit.deadline.into(),
+        sig.v,
+        sig.r,
+        sig.s,
     );
 
     let permit_receipt = provider
@@ -512,23 +522,21 @@ where
             "settle_eip2612_permit",
             owner = %owner,
             spender = %spender,
-            value = %permit_data.value,
+            value = %permit.value,
             token_contract = %contract_address,
             otel.kind = "client",
         ))
         .await?;
 
     if !permit_receipt.status() {
-        return Err(FacilitatorLocalError::ContractCall(
-            format!("Permit transaction failed: {}", permit_receipt.transaction_hash)
-        ));
+        return Err(FacilitatorLocalError::ContractCall(format!(
+            "Permit transaction failed: {}",
+            permit_receipt.transaction_hash
+        )));
     }
 
-    let transfer_call = eip2612_contract.transferFrom(
-        owner,
-        transfer_data.to.into(),
-        transfer_data.amount.into(),
-    );
+    // Step 2: Execute transferFrom using the granted allowance
+    let transfer_call = eip2612_contract.transferFrom(owner, transfer.to.into(), transfer.amount.into());
 
     let transfer_receipt = provider
         .send_transaction(MetaTransaction {
@@ -539,8 +547,8 @@ where
         .instrument(tracing::info_span!(
             "settle_eip2612_transferFrom",
             owner = %owner,
-            to = %transfer_data.to,
-            amount = %transfer_data.amount,
+            to = %transfer.to,
+            amount = %transfer.amount,
             token_contract = %contract_address,
             otel.kind = "client",
         ))
@@ -553,70 +561,56 @@ where
 #[instrument(skip_all, err)]
 async fn verify_eip2612_payment<P: Provider>(
     contract: &USDC::USDCInstance<P>,
-    payment_payload: &ExactEvmPayload,
+    payload: &Eip2612Payload,
     requirements: &PaymentRequirements,
 ) -> Result<MixedAddress, FacilitatorLocalError> {
-    let permit_data = match payment_payload {
-        ExactEvmPayload::Eip2612(Eip2612Payload { permit, .. }) => permit,
-        _ => return Err(FacilitatorLocalError::ContractCall(
-            "Expected EIP-2612 payload".to_string()
-        )),
-    };
+    let Eip2612Payload { permit, .. } = payload;
 
-    let owner: Address = permit_data.owner.into();
+    let owner: Address = permit.owner.into();
     let spender: Address = requirements
         .pay_to
         .clone()
         .try_into()
         .map_err(|e| FacilitatorLocalError::InvalidAddress(format!("{e:?}")))?;
 
-    // Extract v, r, s from signature (assuming 65-byte ECDSA signature)
-    let sig_bytes = &permit_data.signature.0;
-    if sig_bytes.len() != 65 {
-        return Err(FacilitatorLocalError::InvalidSignature(
-            owner.into(),
-            format!("Expected 65-byte signature, got {}", sig_bytes.len()),
-        ));
-    }
-
-    let r = FixedBytes::<32>::from_slice(&sig_bytes[0..32]);
-    let s = FixedBytes::<32>::from_slice(&sig_bytes[32..64]);
-    let v = sig_bytes[64];
+    let sig = EcdsaComponents::from_signature(&permit.signature, owner)?;
 
     // Create EIP2612 contract instance for nonce verification
     let eip2612_contract = EIP2612::new(*contract.address(), contract.provider());
 
-    // Verify current nonce matches
+    // Verify current nonce matches expected
     let current_nonce = eip2612_contract
         .nonces(owner)
         .call()
         .await
         .map_err(|e| FacilitatorLocalError::ContractCall(format!("Failed to get nonce: {e:?}")))?;
 
-    if current_nonce != U256::from(permit_data.nonce) {
+    if current_nonce != U256::from(permit.nonce) {
         return Err(FacilitatorLocalError::InvalidSignature(
             owner.into(),
-            format!("Nonce mismatch: expected {}, got {}", permit_data.nonce, current_nonce),
+            format!("Nonce mismatch: expected {}, got {}", permit.nonce, current_nonce),
         ));
     }
 
-    // Simulate permit call (this will verify the signature on-chain)
+    // Simulate permit call (verifies signature on-chain without executing)
     eip2612_contract
         .permit(
             owner,
             spender,
-            permit_data.value.into(),
-            permit_data.deadline.into(),
-            v,
-            r,
-            s,
+            permit.value.into(),
+            permit.deadline.into(),
+            sig.v,
+            sig.r,
+            sig.s,
         )
         .call()
         .await
-        .map_err(|e| FacilitatorLocalError::InvalidSignature(
-            owner.into(),
-            format!("Permit signature verification failed: {e:?}"),
-        ))?;
+        .map_err(|e| {
+            FacilitatorLocalError::InvalidSignature(
+                owner.into(),
+                format!("Permit signature verification failed: {e:?}"),
+            )
+        })?;
 
     Ok(owner.into())
 }
@@ -648,16 +642,11 @@ where
 
         // Handle EIP-2612 separately with dedicated verification logic
         if let PaymentType::Eip2612 = payment_type {
-            let payment_payload = match &payload.payload {
-                ExactPaymentPayload::Evm(p) => p,
+            let permit = match &payload.payload {
+                ExactPaymentPayload::Evm(ExactEvmPayload::Eip2612(p)) => p,
                 _ => return Err(FacilitatorLocalError::UnsupportedNetwork(None)),
             };
-            let payer = verify_eip2612_payment(
-                &contract,
-                payment_payload,
-                requirements,
-            )
-            .await?;
+            let payer = verify_eip2612_payment(&contract, permit, requirements).await?;
             return Ok(VerifyResponse::valid(payer));
         }
 
@@ -761,18 +750,13 @@ where
 
         // Handle EIP-2612 settlement with dedicated logic
         if let PaymentType::Eip2612 = payment_type {
-            let payment_payload = match &payload.payload {
-                ExactPaymentPayload::Evm(p) => p,
+            let permit = match &payload.payload {
+                ExactPaymentPayload::Evm(ExactEvmPayload::Eip2612(p)) => p,
                 _ => return Err(FacilitatorLocalError::UnsupportedNetwork(None)),
             };
 
-            let (payer, receipt) = settle_eip2612_payment(
-                self,
-                *contract.address(),
-                payment_payload,
-                requirements,
-            )
-            .await?;
+            let (payer, receipt) =
+                settle_eip2612_payment(self, *contract.address(), permit, requirements).await?;
 
             let success = receipt.status();
             if success {
