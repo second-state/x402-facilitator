@@ -457,7 +457,7 @@ impl SolanaProvider {
 
         // Assert valid payment START
         let payment_payload = match &payload.payload {
-            ExactPaymentPayload::Evm(..) => {
+            ExactPaymentPayload::Evm(..) | ExactPaymentPayload::Native(_) => {
                 return Err(FacilitatorLocalError::UnsupportedNetwork(None));
             }
             ExactPaymentPayload::Solana(payload) => payload,

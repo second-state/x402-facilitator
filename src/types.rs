@@ -85,18 +85,19 @@ impl<'de> Deserialize<'de> for X402Version {
     }
 }
 
-/// Enumerates payment schemes. Only "exact" is supported in this implementation,
-/// meaning the amount to be transferred must match exactly.
+/// Enumerates payment schemes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Scheme {
     Exact,
+    Native,
 }
 
 impl Display for Scheme {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let s = match self {
             Scheme::Exact => "exact",
+            Scheme::Native => "native",
         };
         write!(f, "{s}")
     }
@@ -321,11 +322,22 @@ pub struct ExactSolanaPayload {
     pub transaction: String,
 }
 
+/// Native token payment (ETH, AVAX, etc.) referencing an already-submitted transaction.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativePaymentPayload {
+    pub tx_hash: TransactionHash,
+    pub from: EvmAddress,
+    pub to: EvmAddress,
+    pub amount_wei: TokenAmount,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ExactPaymentPayload {
     Evm(ExactEvmPayload),
     Solana(ExactSolanaPayload),
+    Native(NativePaymentPayload),
 }
 
 /// Describes a signed request to transfer a specific amount of funds on-chain.

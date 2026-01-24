@@ -14,6 +14,7 @@
 //! - Settlement is atomic: deploy (if needed) + transfer happen in a single user flow.
 //! - Verification does not persist state.
 
+use alloy::consensus::Transaction as AlloyTransaction;
 use alloy::contract::SolCallBuilder;
 use alloy::dyn_abi::SolType;
 use alloy::network::{
@@ -48,10 +49,10 @@ use crate::network::{Network, USDCDeployment};
 use crate::timestamp::UnixTimestamp;
 use crate::types::{
     Eip2612Payload, Erc3009Payload, EvmAddress, EvmSignature, ExactEvmPayload, ExactPaymentPayload,
-    FacilitatorErrorReason, HexEncodedNonce, MixedAddress, PaymentPayload, PaymentRequirements,
-    Scheme, SettleRequest, SettleResponse, SupportedPaymentKind, SupportedPaymentKindsResponse,
-    TokenAmount, TransactionHash, TransferWithAuthorization, VerifyRequest, VerifyResponse,
-    X402Version,
+    FacilitatorErrorReason, HexEncodedNonce, MixedAddress, NativePaymentPayload, PaymentPayload,
+    PaymentRequirements, Scheme, SettleRequest, SettleResponse, SupportedPaymentKind,
+    SupportedPaymentKindsResponse, TokenAmount, TransactionHash, TransferWithAuthorization,
+    VerifyRequest, VerifyResponse, X402Version,
 };
 
 sol!(
@@ -551,6 +552,61 @@ where
     Ok((owner.into(), transfer_receipt))
 }
 
+/// Verifies a native token payment by checking the on-chain transaction.
+#[instrument(skip_all, err)]
+async fn verify_native_payment<P: Provider>(
+    provider: &P,
+    payload: &NativePaymentPayload,
+    requirements: &PaymentRequirements,
+) -> Result<MixedAddress, FacilitatorLocalError> {
+    let tx_hash = match &payload.tx_hash {
+        TransactionHash::Evm(bytes) => FixedBytes::from(*bytes),
+        _ => return Err(FacilitatorLocalError::DecodingError("expected EVM tx hash".into())),
+    };
+
+    let tx = provider.get_transaction_by_hash(tx_hash.into()).await
+        .map_err(|e| FacilitatorLocalError::ContractCall(e.to_string()))?
+        .ok_or_else(|| FacilitatorLocalError::DecodingError("tx not found".into()))?;
+
+    let expected_to: Address = requirements.pay_to.clone().try_into()
+        .map_err(|_| FacilitatorLocalError::InvalidAddress("pay_to".into()))?;
+
+    let tx_to = tx.inner.to()
+        .ok_or_else(|| FacilitatorLocalError::DecodingError("no recipient".into()))?;
+
+    if tx_to != expected_to {
+        return Err(FacilitatorLocalError::ReceiverMismatch(
+            payload.from.into(), tx_to.to_string(), expected_to.to_string(),
+        ));
+    }
+
+    let required: U256 = requirements.max_amount_required.into();
+    if tx.inner.value() < required {
+        return Err(FacilitatorLocalError::InsufficientValue(payload.from.into()));
+    }
+
+    let receipt = provider.get_transaction_receipt(tx_hash.into()).await
+        .map_err(|e| FacilitatorLocalError::ContractCall(e.to_string()))?
+        .ok_or_else(|| FacilitatorLocalError::DecodingError("not confirmed".into()))?;
+
+    if !receipt.status() {
+        return Err(FacilitatorLocalError::ContractCall("tx failed".into()));
+    }
+
+    let expected_from: Address = payload.from.into();
+    if receipt.from != expected_from {
+        return Err(FacilitatorLocalError::InvalidSignature(
+            payload.from.into(),
+            format!(
+                "Transaction sender mismatch: expected {}, got {}",
+                expected_from, receipt.from
+            ),
+        ));
+    }
+
+    Ok(payload.from.into())
+}
+
 /// Verifies an EIP-2612 payment by simulating permit().
 #[instrument(skip_all, err)]
 async fn verify_eip2612_payment<P: Provider>(
@@ -627,6 +683,18 @@ where
     async fn verify(&self, request: &VerifyRequest) -> Result<VerifyResponse, Self::Error> {
         let payload = &request.payment_payload;
         let requirements = &request.payment_requirements;
+
+        if payload.scheme == Scheme::Native {
+            let native_payload = match &payload.payload {
+                ExactPaymentPayload::Native(p) => p,
+                _ => return Err(FacilitatorLocalError::DecodingError(
+                    "Expected native payload for native scheme".to_string(),
+                )),
+            };
+            let payer = verify_native_payment(self.inner(), native_payload, requirements).await?;
+            return Ok(VerifyResponse::valid(payer));
+        }
+
         let (token_contract, payment, eip712_domain) =
             assert_valid_payment(self.inner(), self.chain(), payload, requirements).await?;
 
@@ -720,6 +788,9 @@ where
 
     /// Settle a verified payment on-chain.
     ///
+    /// For native token payments, the user has already sent the transaction,
+    /// so we simply verify it and return the user's tx hash.
+    ///
     /// If the signer is counterfactual (EIP-6492) and the wallet is not yet deployed,
     /// this submits **one** transaction to Multicall3 (`aggregate3`) that:
     /// 1) calls the 6492 factory with the provided calldata (best-effort prepare),
@@ -739,6 +810,33 @@ where
     async fn settle(&self, request: &SettleRequest) -> Result<SettleResponse, Self::Error> {
         let payload = &request.payment_payload;
         let requirements = &request.payment_requirements;
+
+        // Native: user already submitted tx; we verify and return their tx hash
+        if payload.scheme == Scheme::Native {
+            let native_payload = match &payload.payload {
+                ExactPaymentPayload::Native(p) => p,
+                _ => return Err(FacilitatorLocalError::DecodingError(
+                    "Expected native payload for native scheme".to_string(),
+                )),
+            };
+
+            let payer = verify_native_payment(self.inner(), native_payload, requirements).await?;
+
+            tracing::event!(Level::INFO,
+                status = "ok",
+                tx_hash = ?native_payload.tx_hash,
+                "Native token settlement verified (user tx)"
+            );
+
+            return Ok(SettleResponse {
+                success: true,
+                error_reason: None,
+                payer,
+                transaction: Some(native_payload.tx_hash.clone()),
+                network: payload.network,
+            });
+        }
+
         let (token_contract, payment, eip712_domain) =
             assert_valid_payment(self.inner(), self.chain(), payload, requirements).await?;
 
@@ -916,12 +1014,20 @@ where
 
     /// Report payment kinds supported by this provider on its current network.
     async fn supported(&self) -> Result<SupportedPaymentKindsResponse, Self::Error> {
-        let kinds = vec![SupportedPaymentKind {
-            network: self.chain().network().to_string(),
-            x402_version: X402Version::V1,
-            scheme: Scheme::Exact,
-            extra: None,
-        }];
+        let kinds = vec![
+            SupportedPaymentKind {
+                network: self.chain().network().to_string(),
+                x402_version: X402Version::V1,
+                scheme: Scheme::Exact,
+                extra: None,
+            },
+            SupportedPaymentKind {
+                network: self.chain().network().to_string(),
+                x402_version: X402Version::V1,
+                scheme: Scheme::Native,
+                extra: None,
+            },
+        ];
         Ok(SupportedPaymentKindsResponse { kinds })
     }
 }
@@ -1175,7 +1281,7 @@ async fn assert_valid_payment<P: Provider>(
 ) -> Result<(TokenContract<P>, ExactEvmPayment, Option<Eip712Domain>), FacilitatorLocalError> {
     let payment_payload = match &payload.payload {
         ExactPaymentPayload::Evm(payload) => payload,
-        ExactPaymentPayload::Solana(_) => {
+        ExactPaymentPayload::Solana(_) | ExactPaymentPayload::Native(_) => {
             return Err(FacilitatorLocalError::UnsupportedNetwork(None));
         }
     };
