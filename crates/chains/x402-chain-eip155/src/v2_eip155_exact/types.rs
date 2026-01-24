@@ -10,7 +10,7 @@ use crate::chain::permit2::ExactPermit2Payload;
 use crate::chain::{AssetTransferMethod, ChecksummedAddress, DecimalU256};
 
 /// Re-export the "exact" scheme identifier from V1 (same for both versions).
-pub use crate::v1_eip155_exact::types::{ExactEvmPayload as Eip3009Payload, ExactScheme};
+pub use crate::v1_eip155_exact::types::{Eip3009Payload, ExactScheme};
 
 /// Type alias for V2 verify requests using the exact EVM payment scheme.
 pub type VerifyRequest = v2::VerifyRequest<PaymentPayload, PaymentRequirements>;
@@ -25,7 +25,7 @@ mod facilitator_only {
     use crate::chain::ChecksummedAddress;
     use crate::chain::permit2::ExactPermit2Payload;
     use crate::v1_eip155_exact::ExactScheme;
-    use crate::v2_eip155_exact::{Eip3009Payload, asset_transfer_method};
+    use crate::v2_eip155_exact::{asset_transfer_method, Eip3009Payload};
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     #[serde(untagged)]

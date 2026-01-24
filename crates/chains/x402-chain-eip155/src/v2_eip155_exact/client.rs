@@ -242,12 +242,22 @@ where
                     extra,
                 };
 
-                let evm_payload = sign_erc3009_authorization(&self.signer, &params).await?;
+                let v1_payload = sign_erc3009_authorization(&self.signer, &params).await?;
+                // Extract the inner Erc3009Payload from the v1 ExactEvmPayload enum,
+                // since sign_erc3009_authorization returns the v1 wrapper type.
+                let erc3009_payload = match v1_payload {
+                    crate::v1_eip155_exact::types::ExactEvmPayload::Erc3009(p) => p,
+                    _ => {
+                        return Err(X402Error::SigningError(
+                            "expected ERC-3009 payload from sign_erc3009_authorization".into(),
+                        ))
+                    }
+                };
                 v2::PaymentPayload {
                     x402_version: v2::X402Version2,
                     accepted: self.requirements_json.clone(),
                     resource: self.resource_info.clone(),
-                    payload: ExactEvmPayload::Eip3009(evm_payload),
+                    payload: ExactEvmPayload::Eip3009(erc3009_payload),
                     extensions: None,
                 }
             }

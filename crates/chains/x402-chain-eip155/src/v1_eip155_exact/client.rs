@@ -30,8 +30,8 @@ use x402_types::timestamp::UnixTimestamp;
 use x402_types::util::Base64Bytes;
 
 use crate::v1_eip155_exact::{
-    ExactEvmPayload, ExactEvmPayloadAuthorization, ExactScheme, PaymentRequirementsExtra,
-    TransferWithAuthorization, V1Eip155Exact, types,
+    Erc3009Authorization, Erc3009Payload, ExactEvmPayload, ExactScheme,
+    PaymentRequirementsExtra, TransferWithAuthorization, V1Eip155Exact, types,
 };
 
 use crate::chain::Eip155ChainReference;
@@ -168,7 +168,7 @@ pub async fn sign_erc3009_authorization<S: SignerLike + Sync>(
     let nonce: [u8; 32] = rng().random();
     let nonce = FixedBytes(nonce);
 
-    let authorization = ExactEvmPayloadAuthorization {
+    let authorization = Erc3009Authorization {
         from: signer.address(),
         to: params.pay_to,
         value: params.amount,
@@ -196,10 +196,10 @@ pub async fn sign_erc3009_authorization<S: SignerLike + Sync>(
         .await
         .map_err(|e| X402Error::SigningError(format!("{e:?}")))?;
 
-    Ok(ExactEvmPayload {
+    Ok(ExactEvmPayload::Erc3009(Erc3009Payload {
         signature: signature.as_bytes().into(),
         authorization,
-    })
+    }))
 }
 
 #[allow(dead_code)] // Public for consumption by downstream crates.

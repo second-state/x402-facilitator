@@ -3,7 +3,7 @@
 //! This module defines the wire format types for ERC-3009 based payments
 //! on EVM chains using the V1 x402 protocol.
 
-use alloy_primitives::{Address, B256, Bytes, U256};
+use alloy_primitives::{Address, Bytes, B256, U256};
 use serde::{Deserialize, Serialize};
 use x402_types::lit_str;
 use x402_types::proto::v1;
@@ -30,7 +30,7 @@ pub type PaymentPayload = v1::PaymentPayload<ExactScheme, ExactEvmPayload>;
 /// `transferWithAuthorization` call on an ERC-3009 compliant token contract.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ExactEvmPayload {
+pub struct Erc3009Payload {
     /// The cryptographic signature authorizing the transfer.
     ///
     /// This can be:
@@ -40,7 +40,7 @@ pub struct ExactEvmPayload {
     pub signature: Bytes,
 
     /// The structured authorization data that was signed.
-    pub authorization: ExactEvmPayloadAuthorization,
+    pub authorization: Erc3009Authorization,
 }
 
 /// EIP-712 structured data for ERC-3009 transfer authorization.
@@ -50,7 +50,7 @@ pub struct ExactEvmPayload {
 /// The struct is signed using EIP-712 typed data signing.
 #[derive(Debug, Copy, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ExactEvmPayloadAuthorization {
+pub struct Erc3009Authorization {
     /// The address authorizing the transfer (token owner).
     pub from: Address,
 
@@ -70,6 +70,50 @@ pub struct ExactEvmPayloadAuthorization {
     /// A unique 32-byte nonce to prevent replay attacks.
     pub nonce: B256,
 }
+
+/// EIP-2612 permit authorization data.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Eip2612PermitPayload {
+    pub owner: Address,
+    pub spender: Address,
+    #[serde(with = "crate::decimal_u256")]
+    pub value: U256,
+    pub deadline: UnixTimestamp,
+    pub nonce: u64,
+    pub signature: Bytes,
+}
+
+/// EIP-2612 transfer data for `transferFrom`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Eip2612TransferPayload {
+    pub from: Address,
+    pub to: Address,
+    #[serde(with = "crate::decimal_u256")]
+    pub amount: U256,
+}
+
+/// EIP-2612 payload: permit + transfer for permit-based payments.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Eip2612Payload {
+    pub permit: Eip2612PermitPayload,
+    pub transfer: Eip2612TransferPayload,
+}
+
+/// EVM payment payload supporting both ERC-3009 and EIP-2612 standards.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ExactEvmPayload {
+    /// ERC-3009: Single-step transferWithAuthorization.
+    Erc3009(Erc3009Payload),
+    /// EIP-2612: Two-step permit + transferFrom.
+    Eip2612(Eip2612Payload),
+}
+
+/// Backwards-compatible alias for EIP-3009 payloads used in V2 types.
+pub type Eip3009Payload = Erc3009Payload;
 
 /// Type alias for V1 payment requirements with EVM-specific types.
 pub type PaymentRequirements =
