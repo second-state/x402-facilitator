@@ -258,7 +258,7 @@ impl Serialize for HexEncodedNonce {
 /// Defines who can transfer how much USDC and when.
 #[derive(Debug, Copy, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ExactEvmPayloadAuthorization {
+pub struct Erc3009Authorization {
     pub from: EvmAddress,
     pub to: EvmAddress,
     pub value: TokenAmount,
@@ -271,9 +271,48 @@ pub struct ExactEvmPayloadAuthorization {
 /// includes the signature and the EIP-712 struct.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ExactEvmPayload {
+pub struct Erc3009Payload {
     pub signature: EvmSignature,
-    pub authorization: ExactEvmPayloadAuthorization,
+    pub authorization: Erc3009Authorization,
+}
+
+/// EIP-2612 permit authorization data
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Eip2612PermitPayload {
+    pub owner: EvmAddress,
+    pub spender: EvmAddress,
+    pub value: TokenAmount,
+    pub deadline: UnixTimestamp,
+    pub nonce: u64,
+    pub signature: EvmSignature,
+}
+
+/// EIP-2612 transfer data (for transferFrom)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Eip2612TransferPayload {
+    pub from: EvmAddress,
+    pub to: EvmAddress,
+    pub amount: TokenAmount,
+}
+
+/// EIP-2612 payload: permit + transfer for permit-based payments.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Eip2612Payload {
+    pub permit: Eip2612PermitPayload,
+    pub transfer: Eip2612TransferPayload,
+}
+
+/// EVM payment payload supporting both ERC-3009 and EIP-2612 standards.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ExactEvmPayload {
+    /// ERC-3009: Single-step transferWithAuthorization
+    Erc3009(Erc3009Payload),
+    /// EIP-2612: Two-step permit + transferFrom
+    Eip2612(Eip2612Payload),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -47,10 +47,11 @@ use crate::from_env;
 use crate::network::{Network, USDCDeployment};
 use crate::timestamp::UnixTimestamp;
 use crate::types::{
-    EvmAddress, EvmSignature, ExactPaymentPayload, FacilitatorErrorReason, HexEncodedNonce,
-    MixedAddress, PaymentPayload, PaymentRequirements, Scheme, SettleRequest, SettleResponse,
-    SupportedPaymentKind, SupportedPaymentKindsResponse, TokenAmount, TransactionHash,
-    TransferWithAuthorization, VerifyRequest, VerifyResponse, X402Version,
+    Eip2612Payload, Erc3009Payload, EvmAddress, EvmSignature, ExactEvmPayload, ExactPaymentPayload,
+    FacilitatorErrorReason, HexEncodedNonce, MixedAddress, PaymentPayload, PaymentRequirements,
+    Scheme, SettleRequest, SettleResponse, SupportedPaymentKind, SupportedPaymentKindsResponse,
+    TokenAmount, TransactionHash, TransferWithAuthorization, VerifyRequest, VerifyResponse,
+    X402Version,
 };
 
 sol!(
@@ -60,6 +61,16 @@ sol!(
     #[sol(rpc)]
     USDC,
     "abi/USDC.json"
+);
+
+sol!(
+    /// ERC-20 with EIP-2612 permit extension
+    #[allow(missing_docs)]
+    #[allow(clippy::too_many_arguments)]
+    #[derive(Debug)]
+    #[sol(rpc)]
+    Erc20Permit,
+    "abi/Erc20Permit.json"
 );
 
 sol! {
@@ -438,6 +449,162 @@ impl FromEnvByNetworkBuild for EvmProvider {
     }
 }
 
+/// Decoded ECDSA signature components for EIP-2612 permit calls.
+struct EcdsaComponents {
+    v: u8,
+    r: FixedBytes<32>,
+    s: FixedBytes<32>,
+}
+
+impl EcdsaComponents {
+    /// Extracts v, r, s from a 65-byte ECDSA signature.
+    fn from_signature(sig: &EvmSignature, signer: Address) -> Result<Self, FacilitatorLocalError> {
+        let bytes = &sig.0;
+        if bytes.len() != 65 {
+            return Err(FacilitatorLocalError::InvalidSignature(
+                signer.into(),
+                format!("Expected 65-byte signature, got {}", bytes.len()),
+            ));
+        }
+        Ok(Self {
+            r: FixedBytes::<32>::from_slice(&bytes[0..32]),
+            s: FixedBytes::<32>::from_slice(&bytes[32..64]),
+            v: bytes[64],
+        })
+    }
+}
+
+/// Settles an EIP-2612 payment by executing permit() then transferFrom() on-chain.
+#[instrument(skip_all, err)]
+async fn settle_eip2612_payment<P: MetaEvmProvider>(
+    provider: &P,
+    token_address: Address,
+    payload: &Eip2612Payload,
+    requirements: &PaymentRequirements,
+) -> Result<(MixedAddress, TransactionReceipt), FacilitatorLocalError>
+where
+    FacilitatorLocalError: From<P::Error>,
+{
+    let Eip2612Payload { permit, transfer } = payload;
+
+    let owner: Address = permit.owner.into();
+    let spender: Address = requirements
+        .pay_to
+        .clone()
+        .try_into()
+        .map_err(|e| FacilitatorLocalError::InvalidAddress(format!("{e:?}")))?;
+
+    let sig = EcdsaComponents::from_signature(&permit.signature, owner)?;
+    let token = Erc20Permit::new(token_address, provider.inner());
+
+    let permit_call = token.permit(
+        owner,
+        spender,
+        permit.value.into(),
+        permit.deadline.into(),
+        sig.v,
+        sig.r,
+        sig.s,
+    );
+
+    let permit_receipt = provider
+        .send_transaction(MetaTransaction {
+            to: token_address,
+            calldata: permit_call.calldata().clone(),
+            confirmations: 1,
+        })
+        .instrument(tracing::info_span!(
+            "settle_eip2612_permit",
+            owner = %owner,
+            spender = %spender,
+            value = %permit.value,
+            token_contract = %token_address,
+            otel.kind = "client",
+        ))
+        .await?;
+
+    if !permit_receipt.status() {
+        return Err(FacilitatorLocalError::ContractCall(format!(
+            "Permit transaction failed: {}",
+            permit_receipt.transaction_hash
+        )));
+    }
+
+    let transfer_call = token.transferFrom(owner, transfer.to.into(), transfer.amount.into());
+
+    let transfer_receipt = provider
+        .send_transaction(MetaTransaction {
+            to: token_address,
+            calldata: transfer_call.calldata().clone(),
+            confirmations: 1,
+        })
+        .instrument(tracing::info_span!(
+            "settle_eip2612_transferFrom",
+            owner = %owner,
+            to = %transfer.to,
+            amount = %transfer.amount,
+            token_contract = %token_address,
+            otel.kind = "client",
+        ))
+        .await?;
+
+    Ok((owner.into(), transfer_receipt))
+}
+
+/// Verifies an EIP-2612 payment by simulating permit().
+#[instrument(skip_all, err)]
+async fn verify_eip2612_payment<P: Provider>(
+    token: &Erc20Permit::Erc20PermitInstance<P>,
+    payload: &Eip2612Payload,
+    requirements: &PaymentRequirements,
+) -> Result<MixedAddress, FacilitatorLocalError> {
+    let Eip2612Payload { permit, .. } = payload;
+
+    let owner: Address = permit.owner.into();
+    let spender: Address = requirements
+        .pay_to
+        .clone()
+        .try_into()
+        .map_err(|e| FacilitatorLocalError::InvalidAddress(format!("{e:?}")))?;
+
+    let sig = EcdsaComponents::from_signature(&permit.signature, owner)?;
+
+    let current_nonce = token.nonces(owner).call().await.map_err(|e| {
+        FacilitatorLocalError::ContractCall(format!("Failed to get nonce: {e:?}"))
+    })?;
+
+    if current_nonce != U256::from(permit.nonce) {
+        return Err(FacilitatorLocalError::InvalidSignature(
+            owner.into(),
+            format!(
+                "Nonce mismatch: expected {}, got {}",
+                permit.nonce, current_nonce
+            ),
+        ));
+    }
+
+    token
+        .permit(
+            owner,
+            spender,
+            permit.value.into(),
+            permit.deadline.into(),
+            sig.v,
+            sig.r,
+            sig.s,
+        )
+        .call()
+        .await
+        .map_err(|e| {
+            FacilitatorLocalError::InvalidSignature(
+                owner.into(),
+                format!("Permit verification failed: {e:?}"),
+            )
+        })?;
+
+    Ok(owner.into())
+}
+
 impl<P> Facilitator for P
 where
     P: MetaEvmProvider + Sync,
@@ -460,10 +627,25 @@ where
     async fn verify(&self, request: &VerifyRequest) -> Result<VerifyResponse, Self::Error> {
         let payload = &request.payment_payload;
         let requirements = &request.payment_requirements;
-        let (contract, payment, eip712_domain) =
+        let (token_contract, payment, eip712_domain) =
             assert_valid_payment(self.inner(), self.chain(), payload, requirements).await?;
 
-        let signed_message = SignedMessage::extract(&payment, &eip712_domain)?;
+        // EIP-2612: early return with dedicated verification logic
+        let contract = match token_contract {
+            TokenContract::Erc20Permit(token) => {
+                let permit = match &payload.payload {
+                    ExactPaymentPayload::Evm(ExactEvmPayload::Eip2612(p)) => p,
+                    _ => return Err(FacilitatorLocalError::UnsupportedNetwork(None)),
+                };
+                let payer = verify_eip2612_payment(&token, permit, requirements).await?;
+                return Ok(VerifyResponse::valid(payer));
+            }
+            TokenContract::Usdc(contract) => contract,
+        };
+
+        // ERC-3009 verification flow
+        let domain = eip712_domain.expect("ERC-3009 requires EIP-712 domain");
+        let signed_message = SignedMessage::extract(&payment, &domain)?;
         let payer = signed_message.address;
         let hash = signed_message.hash;
         match signed_message.signature {
@@ -557,10 +739,57 @@ where
     async fn settle(&self, request: &SettleRequest) -> Result<SettleResponse, Self::Error> {
         let payload = &request.payment_payload;
         let requirements = &request.payment_requirements;
-        let (contract, payment, eip712_domain) =
+        let (token_contract, payment, eip712_domain) =
             assert_valid_payment(self.inner(), self.chain(), payload, requirements).await?;
 
-        let signed_message = SignedMessage::extract(&payment, &eip712_domain)?;
+        // EIP-2612: early return with dedicated settlement logic
+        let contract = match token_contract {
+            TokenContract::Erc20Permit(token) => {
+                let permit = match &payload.payload {
+                    ExactPaymentPayload::Evm(ExactEvmPayload::Eip2612(p)) => p,
+                    _ => return Err(FacilitatorLocalError::UnsupportedNetwork(None)),
+                };
+
+                let token_address = *token.address();
+                let (payer, receipt) =
+                    settle_eip2612_payment(self, token_address, permit, requirements).await?;
+
+                let success = receipt.status();
+                if success {
+                    tracing::event!(Level::INFO,
+                        status = "ok",
+                        tx = %receipt.transaction_hash,
+                        "EIP-2612 settlement succeeded"
+                    );
+                    return Ok(SettleResponse {
+                        success: true,
+                        error_reason: None,
+                        payer,
+                        transaction: Some(TransactionHash::Evm(receipt.transaction_hash.0)),
+                        network: payload.network,
+                    });
+                } else {
+                    tracing::event!(
+                        Level::WARN,
+                        status = "failed",
+                        tx = %receipt.transaction_hash,
+                        "EIP-2612 settlement failed"
+                    );
+                    return Ok(SettleResponse {
+                        success: false,
+                        error_reason: Some(FacilitatorErrorReason::InvalidScheme),
+                        payer,
+                        transaction: Some(TransactionHash::Evm(receipt.transaction_hash.0)),
+                        network: payload.network,
+                    });
+                }
+            }
+            TokenContract::Usdc(contract) => contract,
+        };
+
+        // ERC-3009 settlement flow
+        let domain = eip712_domain.expect("ERC-3009 requires EIP-712 domain");
+        let signed_message = SignedMessage::extract(&payment, &domain)?;
         let payer = signed_message.address;
         let transaction_receipt_fut = match signed_message.signature {
             StructuredSignature::EIP6492 {
@@ -867,6 +1096,7 @@ async fn assert_domain<P: Provider>(
             .into_future()
             .instrument(tracing::info_span!(
                 "fetch_eip712_name",
+                token = %asset_address,
                 otel.kind = "client",
             ))
             .await
@@ -894,6 +1124,7 @@ async fn assert_domain<P: Provider>(
             .into_future()
             .instrument(tracing::info_span!(
                 "fetch_eip712_version",
+                token = %asset_address,
                 otel.kind = "client",
             ))
             .await
@@ -908,26 +1139,51 @@ async fn assert_domain<P: Provider>(
     Ok(domain)
 }
 
+/// Token contract enum to distinguish between different contract types
+enum TokenContract<P: Provider> {
+    /// USDC contract (ERC-3009 with transferWithAuthorization)
+    Usdc(USDC::USDCInstance<P>),
+    /// Generic ERC-20 with EIP-2612 permit extension
+    Erc20Permit(Erc20Permit::Erc20PermitInstance<P>),
+}
+
+impl<P: Provider> TokenContract<P> {
+    /// Returns the contract address
+    #[allow(dead_code)]
+    fn address(&self) -> Address {
+        match self {
+            Self::Usdc(c) => *c.address(),
+            Self::Erc20Permit(c) => *c.address(),
+        }
+    }
+}
+
 /// Runs all preconditions needed for a successful payment:
 /// - Valid scheme, network, and receiver.
 /// - Valid time window (validAfter/validBefore).
 /// - Correct EIP-712 domain construction.
 /// - Sufficient on-chain balance.
 /// - Sufficient value in payload.
+///
+/// Returns the payment type along with contract, payment data, and domain.
 #[instrument(skip_all, err)]
 async fn assert_valid_payment<P: Provider>(
     provider: P,
     chain: &EvmChain,
     payload: &PaymentPayload,
     requirements: &PaymentRequirements,
-) -> Result<(USDC::USDCInstance<P>, ExactEvmPayment, Eip712Domain), FacilitatorLocalError> {
+) -> Result<(TokenContract<P>, ExactEvmPayment, Option<Eip712Domain>), FacilitatorLocalError> {
     let payment_payload = match &payload.payload {
         ExactPaymentPayload::Evm(payload) => payload,
         ExactPaymentPayload::Solana(_) => {
             return Err(FacilitatorLocalError::UnsupportedNetwork(None));
         }
     };
-    let payer = payment_payload.authorization.from;
+
+    let payer = match payment_payload {
+        ExactEvmPayload::Erc3009(Erc3009Payload { authorization, .. }) => authorization.from,
+        ExactEvmPayload::Eip2612(Eip2612Payload { permit, .. }) => permit.owner,
+    };
     if payload.network != chain.network {
         return Err(FacilitatorLocalError::NetworkMismatch(
             Some(payer.into()),
@@ -949,7 +1205,17 @@ async fn assert_valid_payment<P: Provider>(
             payload.scheme,
         ));
     }
-    let payload_to: EvmAddress = payment_payload.authorization.to;
+    let (payload_to, valid_after, valid_before) = match payment_payload {
+        ExactEvmPayload::Erc3009(Erc3009Payload { authorization, .. }) => (
+            authorization.to,
+            authorization.valid_after,
+            authorization.valid_before,
+        ),
+        ExactEvmPayload::Eip2612(Eip2612Payload { permit, transfer }) => {
+            (transfer.to, UnixTimestamp(0), permit.deadline)
+        }
+    };
+
     let requirements_to: EvmAddress = requirements
         .pay_to
         .clone()
@@ -962,40 +1228,73 @@ async fn assert_valid_payment<P: Provider>(
             requirements_to.to_string(),
         ));
     }
-    let valid_after = payment_payload.authorization.valid_after;
-    let valid_before = payment_payload.authorization.valid_before;
     assert_time(payer.into(), valid_after, valid_before)?;
-    let asset_address = requirements
+    let asset_address: Address = requirements
         .asset
         .clone()
         .try_into()
         .map_err(|e| FacilitatorLocalError::InvalidAddress(format!("{e:?}")))?;
-    let contract = USDC::new(asset_address, provider);
-
-    let domain = assert_domain(chain, &contract, payload, &asset_address, requirements).await?;
 
     let amount_required = requirements.max_amount_required.0;
-    assert_enough_balance(
-        &contract,
-        &payment_payload.authorization.from,
-        amount_required,
-    )
-    .await?;
-    let value: U256 = payment_payload.authorization.value.into();
-    assert_enough_value(&payer, &value, &amount_required)?;
 
-    let payment = ExactEvmPayment {
-        chain: *chain,
-        from: payment_payload.authorization.from,
-        to: payment_payload.authorization.to,
-        value: payment_payload.authorization.value,
-        valid_after: payment_payload.authorization.valid_after,
-        valid_before: payment_payload.authorization.valid_before,
-        nonce: payment_payload.authorization.nonce,
-        signature: payment_payload.signature.clone(),
-    };
+    match payment_payload {
+        ExactEvmPayload::Eip2612(Eip2612Payload { permit, transfer }) => {
+            if permit.value != transfer.amount {
+                return Err(FacilitatorLocalError::InsufficientValue(permit.owner.into()));
+            }
 
-    Ok((contract, payment, domain))
+            let token = Erc20Permit::new(asset_address, provider);
+            let balance = token
+                .balanceOf(permit.owner.into())
+                .call()
+                .await
+                .map_err(|e| FacilitatorLocalError::ContractCall(format!("{e:?}")))?;
+            if balance < amount_required {
+                return Err(FacilitatorLocalError::InsufficientFunds(
+                    permit.owner.into(),
+                ));
+            }
+            let value_u256: U256 = transfer.amount.into();
+            assert_enough_value(&permit.owner, &value_u256, &amount_required)?;
+
+            let payment = ExactEvmPayment {
+                chain: *chain,
+                from: permit.owner,
+                to: transfer.to,
+                value: transfer.amount,
+                valid_after: UnixTimestamp(0),
+                valid_before: permit.deadline,
+                nonce: HexEncodedNonce([0u8; 32]),
+                signature: permit.signature.clone(),
+            };
+            Ok((TokenContract::Erc20Permit(token), payment, None))
+        }
+        ExactEvmPayload::Erc3009(Erc3009Payload {
+            signature,
+            authorization,
+        }) => {
+            // ERC-3009: use USDC contract with domain
+            let contract = USDC::new(asset_address, provider);
+            assert_enough_balance(&contract, &authorization.from, amount_required).await?;
+            let value_u256: U256 = authorization.value.into();
+            assert_enough_value(&authorization.from, &value_u256, &amount_required)?;
+
+            let domain =
+                assert_domain(chain, &contract, payload, &asset_address, requirements).await?;
+
+            let payment = ExactEvmPayment {
+                chain: *chain,
+                from: authorization.from,
+                to: authorization.to,
+                value: authorization.value,
+                valid_after: authorization.valid_after,
+                valid_before: authorization.valid_before,
+                nonce: authorization.nonce,
+                signature: signature.clone(),
+            };
+            Ok((TokenContract::Usdc(contract), payment, Some(domain)))
+        }
+    }
 }
 
 /// Constructs a full `transferWithAuthorization` call for a verified payment payload.
