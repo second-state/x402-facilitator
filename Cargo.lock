@@ -13409,8 +13409,11 @@ dependencies = [
 name = "x402-chain-eip155"
 version = "1.4.6"
 dependencies = [
+ "alloy-consensus",
  "alloy-contract",
+ "alloy-json-rpc",
  "alloy-network",
+ "alloy-network-primitives",
  "alloy-primitives",
  "alloy-provider",
  "alloy-rpc-client",

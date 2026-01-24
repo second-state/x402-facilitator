@@ -161,7 +161,7 @@ where
                 Ok(v1::SettleResponse::Success {
                     payer: payer.to_string(),
                     transaction: receipt.transaction_hash.to_string(),
-                    network: payload.network.clone(),
+                    network: requirements.network.clone(),
                 }
                 .into())
             }
