@@ -37,6 +37,7 @@ impl TryFrom<Network> for SolanaChain {
         match value {
             Network::Solana => Ok(Self { network: value }),
             Network::SolanaDevnet => Ok(Self { network: value }),
+            Network::Ethereum => Err(FacilitatorLocalError::UnsupportedNetwork(None)),
             Network::BaseSepolia => Err(FacilitatorLocalError::UnsupportedNetwork(None)),
             Network::Base => Err(FacilitatorLocalError::UnsupportedNetwork(None)),
             Network::XdcMainnet => Err(FacilitatorLocalError::UnsupportedNetwork(None)),

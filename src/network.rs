@@ -18,6 +18,9 @@ use std::str::FromStr;
 /// Used to differentiate between testnet and mainnet environments for the x402 protocol.
 #[derive(Debug, Hash, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Network {
+    /// Ethereum mainnet (chain ID 1).
+    #[serde(rename = "ethereum")]
+    Ethereum,
     /// Base Sepolia testnet (chain ID 84532).
     #[serde(rename = "base-sepolia")]
     BaseSepolia,
@@ -59,6 +62,7 @@ pub enum Network {
 impl Display for Network {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
+            Network::Ethereum => write!(f, "ethereum"),
             Network::BaseSepolia => write!(f, "base-sepolia"),
             Network::Base => write!(f, "base"),
             Network::XdcMainnet => write!(f, "xdc"),
@@ -84,6 +88,7 @@ pub enum NetworkFamily {
 impl From<Network> for NetworkFamily {
     fn from(value: Network) -> Self {
         match value {
+            Network::Ethereum => NetworkFamily::Evm,
             Network::BaseSepolia => NetworkFamily::Evm,
             Network::Base => NetworkFamily::Evm,
             Network::XdcMainnet => NetworkFamily::Evm,
@@ -104,6 +109,7 @@ impl Network {
     /// Return all known [`Network`] variants.
     pub fn variants() -> &'static [Network] {
         &[
+            Network::Ethereum,
             Network::BaseSepolia,
             Network::Base,
             Network::XdcMainnet,
@@ -119,6 +125,21 @@ impl Network {
         ]
     }
 }
+
+/// Lazily initialized known USDC deployment on Ethereum mainnet as [`USDCDeployment`].
+static USDC_ETHEREUM: Lazy<USDCDeployment> = Lazy::new(|| {
+    USDCDeployment(TokenDeployment {
+        asset: TokenAsset {
+            address: address!("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").into(),
+            network: Network::Ethereum,
+        },
+        decimals: 6,
+        eip712: Some(TokenDeploymentEip712 {
+            name: "USD Coin".into(),
+            version: "2".into(),
+        }),
+    })
+});
 
 /// Lazily initialized known USDC deployment on Base Sepolia as [`USDCDeployment`].
 static USDC_BASE_SEPOLIA: Lazy<USDCDeployment> = Lazy::new(|| {
@@ -331,6 +352,7 @@ impl USDCDeployment {
     /// Panic if the network is unsupported (not expected in practice).
     pub fn by_network<N: Borrow<Network>>(network: N) -> &'static USDCDeployment {
         match network.borrow() {
+            Network::Ethereum => &USDC_ETHEREUM,
             Network::BaseSepolia => &USDC_BASE_SEPOLIA,
             Network::Base => &USDC_BASE,
             Network::XdcMainnet => &USDC_XDC,

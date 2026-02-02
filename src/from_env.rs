@@ -11,6 +11,7 @@ pub const ENV_SIGNER_TYPE: &str = "SIGNER_TYPE";
 pub const ENV_EVM_PRIVATE_KEY: &str = "EVM_PRIVATE_KEY";
 pub const ENV_SOLANA_PRIVATE_KEY: &str = "SOLANA_PRIVATE_KEY";
 
+pub const ENV_RPC_ETHEREUM: &str = "RPC_URL_ETHEREUM";
 pub const ENV_RPC_BASE: &str = "RPC_URL_BASE";
 pub const ENV_RPC_BASE_SEPOLIA: &str = "RPC_URL_BASE_SEPOLIA";
 pub const ENV_RPC_XDC: &str = "RPC_URL_XDC";
@@ -26,6 +27,7 @@ pub const ENV_RPC_SEI_TESTNET: &str = "RPC_URL_SEI_TESTNET";
 
 pub fn rpc_env_name_from_network(network: Network) -> &'static str {
     match network {
+        Network::Ethereum => ENV_RPC_ETHEREUM,
         Network::BaseSepolia => ENV_RPC_BASE_SEPOLIA,
         Network::Base => ENV_RPC_BASE,
         Network::XdcMainnet => ENV_RPC_XDC,

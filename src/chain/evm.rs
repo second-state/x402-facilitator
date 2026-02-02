@@ -135,6 +135,7 @@ impl TryFrom<Network> for EvmChain {
     /// Returns [`FacilitatorLocalError::UnsupportedNetwork`] for non-EVM networks (e.g. Solana).
     fn try_from(value: Network) -> Result<Self, Self::Error> {
         match value {
+            Network::Ethereum => Ok(EvmChain::new(value, 1)),
             Network::BaseSepolia => Ok(EvmChain::new(value, 84532)),
             Network::Base => Ok(EvmChain::new(value, 8453)),
             Network::XdcMainnet => Ok(EvmChain::new(value, 50)),
@@ -432,6 +433,7 @@ impl FromEnvByNetworkBuild for EvmProvider {
         };
         let wallet = from_env::SignerType::from_env()?.make_evm_wallet()?;
         let is_eip1559 = match network {
+            Network::Ethereum => true,
             Network::BaseSepolia => true,
             Network::Base => true,
             Network::XdcMainnet => false,
