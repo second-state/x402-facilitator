@@ -15,11 +15,14 @@ members = [
 
 [workspace.package]
 version = "1.4.6"
-authors = ["Sergey Ukustov <sergey@ukstv.me>"]
+authors = ["Sergey Ukustov <sergey@ukstv.me>", "hydai <hydai@secondstate.io>"]
 edition = "2024"
 license = "Apache-2.0"
-repository = "https://github.com/x402-rs/x402-rs"
-homepage = "https://x402.rs"
+repository = "https://github.com/second-state/x402-facilitator"
+description = "x402 facilitator in Rust"
+readme = "README.md"
+homepage = "https://github.com/second-state/x402-facilitator"
+documentation = "https://docs.rs/x402-facilitator"
 rust-version = "1.88.0"
 keywords = ["blockchain", "payments", "x402", "stablecoin", "http-402"]
 categories = ["cryptography::cryptocurrencies", "finance", "network-programming", "web-programming::http-server"]

@@ -1,3 +1,32 @@
+# x402-facilitator
+
+> This project is forked from [x402-rs](https://github.com/x402-rs/x402-rs) in Oct 2025. The source code is released under the same Apache 2.0 license.
+
+The **x402 facilitator project** aims to create universal x402 payment infrastructure for both humans and machines (AI agents). It will support the x402 payment protocol across
+
+* all blockchains.
+* all fungible tokens and coins, including all ERC-20 compatible tokens.
+* traditional credit card payment networks.
+* traditional bank transfers.
+
+The initial focus is to support USDC and USDT stablecoins across blockchains.
+
+## Current software release
+
+* Rust crate for [x402-facilitator](https://crates.io/crates/x402-facilitator)
+* [Documentation](https://docs.rs/x402-facilitator)
+* Demo: [payment link](https://pay.x402labs.dev/demo) | [screencast](https://youtube.com/shorts/5l6WhjIHk1A)
+
+## Supported clients
+
+The **x402-facilitator** works with all x402-compatible clients, SDKs, and middleware. Just configure them to use your own facilitator server (see below).
+
+* RECOMMENDED: [x402 payment link](https://github.com/second-state/x402-payment-link) similar to Stripe payment links
+* The Coinbase SDKs for [Python](https://github.com/coinbase/x402/tree/main/examples/python) and [Typescript](https://github.com/coinbase/x402/tree/main/examples/typescript)
+* Starter project templates: [x402-starter-kit](https://github.com/dabit3/x402-starter-kit) | [create-x402](https://github.com/dabit3/create-x402)
+
+---
+
 # x402-rs
 
 [![Crates.io](https://img.shields.io/crates/v/x402-types.svg)](https://crates.io/crates/x402-types)
