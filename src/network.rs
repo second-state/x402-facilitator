@@ -54,6 +54,12 @@ pub enum Network {
     /// Sei testnet (chain ID 1328).
     #[serde(rename = "sei-testnet")]
     SeiTestnet,
+    /// Ethereum mainnet (chain ID 1).
+    #[serde(rename = "ethereum")]
+    Ethereum,
+    /// Ethereum Sepolia testnet (chain ID 11155111).
+    #[serde(rename = "ethereum-sepolia")]
+    EthereumSepolia,
 }
 
 impl Display for Network {
@@ -71,6 +77,8 @@ impl Display for Network {
             Network::Polygon => write!(f, "polygon"),
             Network::Sei => write!(f, "sei"),
             Network::SeiTestnet => write!(f, "sei-testnet"),
+            Network::Ethereum => write!(f, "ethereum"),
+            Network::EthereumSepolia => write!(f, "ethereum-sepolia"),
         }
     }
 }
@@ -96,6 +104,8 @@ impl From<Network> for NetworkFamily {
             Network::Polygon => NetworkFamily::Evm,
             Network::Sei => NetworkFamily::Evm,
             Network::SeiTestnet => NetworkFamily::Evm,
+            Network::Ethereum => NetworkFamily::Evm,
+            Network::EthereumSepolia => NetworkFamily::Evm,
         }
     }
 }
@@ -116,6 +126,8 @@ impl Network {
             Network::Polygon,
             Network::Sei,
             Network::SeiTestnet,
+            Network::Ethereum,
+            Network::EthereumSepolia,
         ]
     }
 }
@@ -282,6 +294,36 @@ static USDC_SEI_TESTNET: Lazy<USDCDeployment> = Lazy::new(|| {
     })
 });
 
+/// Lazily initialized known USDC deployment on Ethereum mainnet as [`USDCDeployment`].
+static USDC_ETHEREUM: Lazy<USDCDeployment> = Lazy::new(|| {
+    USDCDeployment(TokenDeployment {
+        asset: TokenAsset {
+            address: address!("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").into(),
+            network: Network::Ethereum,
+        },
+        decimals: 6,
+        eip712: Some(TokenDeploymentEip712 {
+            name: "USD Coin".into(),
+            version: "2".into(),
+        }),
+    })
+});
+
+/// Lazily initialized known USDC deployment on Ethereum Sepolia testnet as [`USDCDeployment`].
+static USDC_ETHEREUM_SEPOLIA: Lazy<USDCDeployment> = Lazy::new(|| {
+    USDCDeployment(TokenDeployment {
+        asset: TokenAsset {
+            address: address!("0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238").into(),
+            network: Network::EthereumSepolia,
+        },
+        decimals: 6,
+        eip712: Some(TokenDeploymentEip712 {
+            name: "USDC".into(),
+            version: "2".into(),
+        }),
+    })
+});
+
 /// A known USDC deployment as a wrapper around [`TokenDeployment`].
 #[derive(Clone, Debug)]
 pub struct USDCDeployment(pub TokenDeployment);
@@ -343,6 +385,8 @@ impl USDCDeployment {
             Network::Polygon => &USDC_POLYGON,
             Network::Sei => &USDC_SEI,
             Network::SeiTestnet => &USDC_SEI_TESTNET,
+            Network::Ethereum => &USDC_ETHEREUM,
+            Network::EthereumSepolia => &USDC_ETHEREUM_SEPOLIA,
         }
     }
 }
