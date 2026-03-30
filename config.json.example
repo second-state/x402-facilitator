@@ -3,7 +3,7 @@
   "host": "0.0.0.0",
   "chains": {
     "eip155:84532": {
-      "_comment": "Base Sepolia"
+      "_comment": "Base Sepolia",
       "eip1559": true,
       "flashblocks": true,
       "signers": [
@@ -16,9 +16,45 @@
         }
       ]
     },
+    "eip155:8453": {
+      "_comment": "Base Mainnet",
+      "eip1559": true,
+      "signers": [
+          "$EVM_PRIVATE_KEY"
+      ],
+      "rpc": [
+        {
+          "http": "https://rpc.com/eip155/8453"
+        }
+      ]
+    },
+    "eip155:1": {
+      "_comment": "Ethereum Mainnet",
+      "eip1559": true,
+      "signers": [
+          "$EVM_PRIVATE_KEY"
+      ],
+      "rpc": [
+        {
+          "http": "https://rpc.com/eip155/1"
+        }
+      ]
+    },
+    "eip155:11155111": {
+      "_comment": "Ethereum Sepolia",
+      "eip1559": true,
+      "signers": [
+          "$EVM_PRIVATE_KEY"
+      ],
+      "rpc": [
+        {
+          "http": "https://rpc.com/eip155/11155111"
+        }
+      ]
+    },
     "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp": {
-      "_comment": "Solana Mainnet"
-      "signer": "SOLANA_PRIVATE_KEY",
+      "_comment": "Solana Mainnet",
+      "signer": "$SOLANA_PRIVATE_KEY",
       "rpc": "https://rpc.com/solana/5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
       "pubsub": "wss://rpc.com/solana/5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"
     }
@@ -29,7 +65,15 @@
         "chains": "eip155:*"
       },
       {
+        "id": "v1-eip155-native",
+        "chains": "eip155:*"
+      },
+      {
         "id": "v2-eip155-exact",
+        "chains": "eip155:*"
+      },
+      {
+        "id": "v2-eip155-upto",
         "chains": "eip155:*"
       },
       {
