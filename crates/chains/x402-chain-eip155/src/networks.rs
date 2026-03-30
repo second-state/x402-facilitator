@@ -75,6 +75,12 @@ pub trait KnownNetworkEip155<A> {
 
     /// Returns the instance for Celo testnet (eip155:11142220)
     fn celo_sepolia() -> A;
+
+    /// Returns the instance for Ethereum mainnet (eip155:1)
+    fn ethereum() -> A;
+
+    /// Returns the instance for Ethereum Sepolia testnet (eip155:11155111)
+    fn ethereum_sepolia() -> A;
 }
 
 /// Implementation of KnownNetworkEip155 for ChainId.
@@ -141,6 +147,14 @@ impl KnownNetworkEip155<ChainId> for ChainId {
 
     fn celo_sepolia() -> ChainId {
         ChainId::new("eip155", "11142220")
+    }
+
+    fn ethereum() -> ChainId {
+        ChainId::new("eip155", "1")
+    }
+
+    fn ethereum_sepolia() -> ChainId {
+        ChainId::new("eip155", "11155111")
     }
 }
 
@@ -302,6 +316,30 @@ impl KnownNetworkEip155<Eip155TokenDeployment> for USDC {
         Eip155TokenDeployment {
             chain_reference: Eip155ChainReference::new(11142220),
             address: alloy_primitives::address!("0x01C5C0122039549AD1493B8220cABEdD739BC44E"),
+            decimals: 6,
+            transfer_method: AssetTransferMethod::Eip3009 {
+                name: "USDC".into(),
+                version: "2".into(),
+            },
+        }
+    }
+
+    fn ethereum() -> Eip155TokenDeployment {
+        Eip155TokenDeployment {
+            chain_reference: Eip155ChainReference::new(1),
+            address: alloy_primitives::address!("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"),
+            decimals: 6,
+            transfer_method: AssetTransferMethod::Eip3009 {
+                name: "USD Coin".into(),
+                version: "2".into(),
+            },
+        }
+    }
+
+    fn ethereum_sepolia() -> Eip155TokenDeployment {
+        Eip155TokenDeployment {
+            chain_reference: Eip155ChainReference::new(11155111),
+            address: alloy_primitives::address!("0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238"),
             decimals: 6,
             transfer_method: AssetTransferMethod::Eip3009 {
                 name: "USDC".into(),

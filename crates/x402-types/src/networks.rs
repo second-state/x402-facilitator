@@ -227,6 +227,17 @@ pub static KNOWN_NETWORKS: &[NetworkInfo] = &[
         namespace: "eip155",
         reference: "11142220",
     },
+    // Ethereum Networks
+    NetworkInfo {
+        name: "ethereum",
+        namespace: "eip155",
+        reference: "1",
+    },
+    NetworkInfo {
+        name: "ethereum-sepolia",
+        namespace: "eip155",
+        reference: "11155111",
+    },
     // Solana Networks
     NetworkInfo {
         name: "solana",
