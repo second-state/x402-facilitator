@@ -272,6 +272,8 @@ pub trait MetaEvmProvider {
     fn inner(&self) -> &Self::Inner;
     /// Returns reference to chain descriptor.
     fn chain(&self) -> &EvmChain;
+    /// Returns the default signer address used for sending transactions.
+    fn default_signer_address(&self) -> Address;
 
     /// Sends a meta-transaction to the network.
     fn send_transaction(
@@ -300,6 +302,10 @@ impl MetaEvmProvider for EvmProvider {
 
     fn chain(&self) -> &EvmChain {
         &self.chain
+    }
+
+    fn default_signer_address(&self) -> Address {
+        self.inner.default_signer_address()
     }
 
     /// Send a meta-transaction with provided `to`, `calldata`, and automatically selected signer.
@@ -485,7 +491,7 @@ async fn settle_eip2612_payment<P: MetaEvmProvider>(
     provider: &P,
     token_address: Address,
     payload: &Eip2612Payload,
-    requirements: &PaymentRequirements,
+    signer_address: Address,
 ) -> Result<(MixedAddress, TransactionReceipt), FacilitatorLocalError>
 where
     FacilitatorLocalError: From<P::Error>,
@@ -493,11 +499,7 @@ where
     let Eip2612Payload { permit, transfer } = payload;
 
     let owner: Address = permit.owner.into();
-    let spender: Address = requirements
-        .pay_to
-        .clone()
-        .try_into()
-        .map_err(|e| FacilitatorLocalError::InvalidAddress(format!("{e:?}")))?;
+    let spender: Address = signer_address;
 
     let sig = EcdsaComponents::from_signature(&permit.signature, owner)?;
     let token = Erc20Permit::new(token_address, provider.inner());
@@ -616,16 +618,12 @@ async fn verify_native_payment<P: Provider>(
 async fn verify_eip2612_payment<P: Provider>(
     token: &Erc20Permit::Erc20PermitInstance<P>,
     payload: &Eip2612Payload,
-    requirements: &PaymentRequirements,
+    signer_address: Address,
 ) -> Result<MixedAddress, FacilitatorLocalError> {
     let Eip2612Payload { permit, .. } = payload;
 
     let owner: Address = permit.owner.into();
-    let spender: Address = requirements
-        .pay_to
-        .clone()
-        .try_into()
-        .map_err(|e| FacilitatorLocalError::InvalidAddress(format!("{e:?}")))?;
+    let spender: Address = signer_address;
 
     let sig = EcdsaComponents::from_signature(&permit.signature, owner)?;
 
@@ -709,7 +707,7 @@ where
                     ExactPaymentPayload::Evm(ExactEvmPayload::Eip2612(p)) => p,
                     _ => return Err(FacilitatorLocalError::UnsupportedNetwork(None)),
                 };
-                let payer = verify_eip2612_payment(&token, permit, requirements).await?;
+                let payer = verify_eip2612_payment(&token, permit, self.default_signer_address()).await?;
                 return Ok(VerifyResponse::valid(payer));
             }
             TokenContract::Usdc(contract) => contract,
@@ -854,7 +852,7 @@ where
 
                 let token_address = *token.address();
                 let (payer, receipt) =
-                    settle_eip2612_payment(self, token_address, permit, requirements).await?;
+                    settle_eip2612_payment(self, token_address, permit, self.default_signer_address()).await?;
 
                 let success = receipt.status();
                 if success {
