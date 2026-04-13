@@ -111,7 +111,12 @@ where
                 domain,
             } => verify_payment(self.provider.inner(), &contract, &payment, &domain).await?,
             ValidatedPayment::Eip2612 { token, payload } => {
-                verify_eip2612_payment(&token, payload, requirements).await?
+                let signer_address = self.provider.signer_addresses()
+                    .first()
+                    .ok_or_else(|| Eip155ExactError::ContractCall("No signer address configured".to_string()))?
+                    .parse::<Address>()
+                    .map_err(|e| Eip155ExactError::ContractCall(format!("Invalid signer address: {e}")))?;
+                verify_eip2612_payment(&token, payload, signer_address).await?
             }
         };
 
@@ -150,11 +155,16 @@ where
             }
             ValidatedPayment::Eip2612 { token, payload } => {
                 let token_address = *token.address();
+                let signer_address = self.provider.signer_addresses()
+                    .first()
+                    .ok_or_else(|| Eip155ExactError::ContractCall("No signer address configured".to_string()))?
+                    .parse::<Address>()
+                    .map_err(|e| Eip155ExactError::ContractCall(format!("Invalid signer address: {e}")))?;
                 let (payer, receipt) = settle_eip2612_payment(
                     &self.provider,
                     token_address,
                     payload,
-                    requirements,
+                    signer_address,
                 )
                 .await?;
 
@@ -550,10 +560,10 @@ where
 async fn verify_eip2612_payment<P: Provider>(
     token: &Erc20Permit::Erc20PermitInstance<P>,
     payload: &types::Eip2612Payload,
-    requirements: &types::PaymentRequirements,
+    signer_address: Address,
 ) -> Result<Address, Eip155ExactError> {
     let permit = &payload.permit;
-    let spender = requirements.pay_to;
+    let spender = signer_address;
     let sig = EcdsaComponents::from_signature(&permit.signature)?;
 
     let current_nonce = token
@@ -596,14 +606,14 @@ async fn settle_eip2612_payment<P: Eip155MetaTransactionProvider>(
     provider: &P,
     token_address: Address,
     payload: &types::Eip2612Payload,
-    requirements: &types::PaymentRequirements,
+    signer_address: Address,
 ) -> Result<(Address, TransactionReceipt), Eip155ExactError>
 where
     Eip155ExactError: From<P::Error>,
 {
     let permit = &payload.permit;
     let transfer = &payload.transfer;
-    let spender = requirements.pay_to;
+    let spender = signer_address;
     let sig = EcdsaComponents::from_signature(&permit.signature)?;
     let token = Erc20Permit::new(token_address, provider.inner());
 
